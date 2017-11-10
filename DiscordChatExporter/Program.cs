@@ -1,14 +1,18 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Net;
 using System.Reflection;
 using System.Resources;
 using System.Text.RegularExpressions;
+using System.Threading;
 using System.Threading.Tasks;
 using AmmySidekick;
+using DiscordChatExporter.Exceptions;
 using DiscordChatExporter.Models;
 using DiscordChatExporter.Services;
 using Tyrrrz.Extensions;
+using Message = DiscordChatExporter.Models.Message;
 
 namespace DiscordChatExporter
 {
@@ -88,18 +92,80 @@ namespace DiscordChatExporter
             DateTime to = new DateTime(year, month, 1).AddMonths(1);
 
             Console.WriteLine("Retrieving servers...");
-            var guilds = await dataService.GetUserGuildsAsync(token);
+            var guilds = new List<Guild>(await dataService.GetUserGuildsAsync(token));
+            guilds.Add(Guild.DirectMessages);
             foreach (var guild in guilds)
             {
                 Console.WriteLine("Retrieving channels for " + guild.Name + "...");
-                var channels = await dataService.GetGuildChannelsAsync(token, guild.Id);
+                IReadOnlyList<Channel> channels;
+                while (true)
+                {
+                    try
+                    {
+                        if (guild == Guild.DirectMessages)
+                        {
+                            channels = await dataService.GetDirectMessageChannelsAsync(token);
+                        }
+                        else
+                        {
+                            channels = await dataService.GetGuildChannelsAsync(token, guild.Id);                            
+                        }
+                        
+                        break;
+                    }
+                    catch (Exception e)
+                    {
+                        Console.WriteLine(e);
+                            
+                        // If we get an error, it might be Discord asking us to kindly back off.
+                        // Give them a short break.
+                        Thread.Sleep(10000);
+                        throw;
+                    }
+                }
                 foreach (var channel in channels)
                 {
                     var filePath = "Export/" + guild.Name + "/" + channel.Name + "/" + year + "-" + month + (format == ExportFormat.PlainText ? ".txt" : ".html");
 
                     // Get messages
                     Console.WriteLine("Retrieving messages for " + guild.Name + ":" + channel.Name);
-                    var messages = await dataService.GetChannelMessagesAsync(token, channel.Id, from, to);
+
+                    IReadOnlyList<Message> messages = null;
+                    while (true)
+                    {
+                        try
+                        {
+                            messages = await dataService.GetChannelMessagesAsync(token, channel.Id, from, to);
+                            break;
+                        }
+                        catch (HttpErrorStatusCodeException e)
+                        {
+                            // This indicates a channel we don't have access to.
+                            if (e.StatusCode == HttpStatusCode.Forbidden)
+                            {
+                                break;
+                            }
+                            
+                            Console.WriteLine(e);
+                            
+                            // If we get an error, it might be Discord asking us to kindly back off.
+                            // Give them a short break.
+                            Thread.Sleep(10000);
+                        }
+                        catch (Exception e)
+                        {
+                            Console.WriteLine(e);
+                            
+                            // If we get an error, it might be Discord asking us to kindly back off.
+                            // Give them a short break.
+                            Thread.Sleep(10000);
+                            throw;
+                        }
+                    }
+                    if (messages == null)
+                    {
+                        continue;
+                    }
 
                     // Group them
                     var messageGroups = messageGroupService.GroupMessages(messages);
